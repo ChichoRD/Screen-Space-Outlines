@@ -189,11 +189,12 @@ Shader "Hidden/Screen Space Outlines"
                 rawDepth = SampleSceneDepth(uv).r;
             }
 
-            float SDEdge(float2 uv, out float curvature, out float rawDepth, out float2 edgeUV)
+            float SDEdge(float2 uv, out float curvature, out float rawDepth, out float2 edgeUV, out float edgeScore)
             {
                 curvature = 0.0f;
                 edgeUV = uv;
                 float minDistanceToEdge = 1.#INF;
+                edgeScore = 1.0f;
 
                 float3 centralColor = 0.0f;
                 float3 centralNormalWS = 0.0f;
@@ -218,6 +219,7 @@ Shader "Hidden/Screen Space Outlines"
                     float colorDistance = RedMeanColorDifference(centralColor, neighborColor);
                     float normalDistance = NormalDifference(centralNormalWS, neighborNormalWS);
                     float geometricDistance = SDPlane(centralPositionWS, centralNormalWS, neighborPositionWS);
+                    float absoluteGeometricDistance = abs(geometricDistance);
 
                     curvature -= geometricDistance;
                     float positionDifferenceWS = neighborPositionWS - centralPositionWS;
@@ -225,10 +227,16 @@ Shader "Hidden/Screen Space Outlines"
 
                     float2 tentativeEdgeUV = lerp(uv, neighborUV, 0.5f);
                     float tentativeEdgeDistance = TaxicabDistance(uv, tentativeEdgeUV);
+                    edgeScore = min(
+                        edgeScore,
+                        (_ColorThresholdFactor + _NormalThresholdFactor + _GeometryThresholdFactor)
+                            / (colorDistance / _ColorThresholdFactor
+                                + normalDistance / _NormalThresholdFactor
+                                + absoluteGeometricDistance / _GeometryThresholdFactor));
 
                     if ((colorDistance > _ColorThresholdFactor
                         || normalDistance > _NormalThresholdFactor
-                        || abs(geometricDistance) > _GeometryThresholdFactor)
+                        || absoluteGeometricDistance > _GeometryThresholdFactor)
                             && tentativeEdgeDistance < minDistanceToEdge)
                     {
 						edgeUV = tentativeEdgeUV;
@@ -245,8 +253,13 @@ Shader "Hidden/Screen Space Outlines"
                 float curvature = 0.0f;
                 float rawDepth = 0.0f;
                 float2 edgeUV = i.uv;
-                float minDistanceToEdge = SDEdge(i.uv, curvature, rawDepth, edgeUV);
-                return float4(edgeUV, curvature * 0.5f + 0.5f, minDistanceToEdge);
+                float edgeScore = 1.0f;
+                float minDistanceToEdge = SDEdge(i.uv, curvature, rawDepth, edgeUV, edgeScore);
+                float scoreBias = smoothstep(
+                    _OutlineThreshold * 0.5f,
+                    1.0f - _OutlineThreshold * 0.5f,
+                    edgeScore * _OutlineThreshold * 2.0f);
+                return float4(edgeUV, curvature * 0.5f + 0.5f, saturate(minDistanceToEdge + scoreBias));
             }
 
             ENDHLSL
@@ -268,7 +281,7 @@ Shader "Hidden/Screen Space Outlines"
 
             float DistanceToFeature(float2 uv, float2 featureUV, float4 feature)
             {
-                return TaxicabDistance(uv, featureUV);
+                return TaxicabDistance(uv, featureUV) + feature.w;
             //    float2 featureDisplacement = featureUV - uv;
             //    return dot(featureDisplacement, featureDisplacement);
             }
@@ -402,8 +415,6 @@ Shader "Hidden/Screen Space Outlines"
 	            float4 feature = SAMPLE_TEXTURE2D(_MainTex, sampler_MainTex, i.uv);
                 //More correct
                 //float2 featureUV = mul(_UVFromFeature, feature);
-                if (feature.w == 1.0f)
-                    return 0.0f;
                 float2 featureUV = feature.xy;
                 float distanceToFeature = distance(i.uv, featureUV);
 
@@ -426,7 +437,7 @@ Shader "Hidden/Screen Space Outlines"
 
                 float4 curvatureColor = lerp(_ConcavityOverlayColor, _ConvexityOverlayColor, curvatureFactor);
                 float4 compositeColor = HardLight(_OutlineColor, curvatureColor);
-                return float4(compositeColor.rgb, compositeColor.a * outlineAlpha);
+                return float4(compositeColor.rgb, compositeColor.a * outlineAlpha * (1.0f - feature.w));
             }
 
             ENDHLSL
